@@ -4,6 +4,7 @@
 (require slideshow/slides-to-picts)
 
 (require racket/draw)
+(require slideshow/repl)
 
 (provide (all-defined-out))
 
@@ -11,6 +12,9 @@
 
 (define BORDERWIDTH 3)
 (define CORNER-RADIUS -0.15)
+
+(define current-iter (make-parameter 0))
+(define current-time (make-parameter 0))
 
 (current-font-size 30)
 (current-titlet
@@ -32,6 +36,7 @@
 (define light-blue (light blue))
 (define green (dark "green"))
 (define red "red")
+(define black "black")
 
 
 (define (tt str)
@@ -47,12 +52,33 @@
 
 
 ;; impose pictb on to picta
-(define (superimpose picta pictb x y)
+(define (superimpose x y picta pictb)
   (lt-superimpose
     (vl-append (blank 0 (if (< y 0) (- y) 0))
       (ht-append (blank (if (< x 0) (- x) 0) 0) picta))
     (vl-append (blank 0 (if (> y 0) y 0))
       (ht-append (blank (if (> x 0) x 0) 0) pictb))))
+
+;; like the append methods, but stacks the elements on top of each other
+(define (stack x y . elements)
+  (cond 
+    [(empty? elements)
+      (blank 0 0)]
+    [(equal? (length elements) 1)
+      (first elements)]
+    [else
+    (superimpose x y
+      (first elements)
+      (apply (curry stack x y) (rest elements)))]))
+
+
+(define bitmap-cache
+  (make-hash))
+
+(define (cached-bitmap name)
+  (hash-ref! bitmap-cache name
+             (lambda ()
+               (bitmap name))))
 
 
 (define (indent . content)
@@ -79,6 +105,16 @@
                          [(procedure? title) (title iter)]
                          [else title])  #:skip-first? #t #:layout layout
                (lambda (t) (func iter t)))))
+
+(define-syntax-rule (dynamic-slide title (vars ...) body ...)
+  (begin
+    (match-define (list vars ...) (range 1 (+ (length `(vars ...)) 1)))
+    (make-dynamic-slide
+      #:iters (+ (length `(vars ...)) 1)
+      #:title title
+      (lambda (iter time)
+        (parameterize ([current-iter iter] [current-time time])
+        body ...)))))
 
 (define (make-node text [highlighted #f])
   (define element (t text))
@@ -150,7 +186,7 @@
             #:y-adjust-label y-adjust-label
             #:style 'long-dash))
 
-(define (make-bubble #:width [width #f] #:height [height #f] #:padding [padding 30] #:color [color blue] . children)
+(define (make-bubble #:width [width #f] #:height [height #f] #:padding [padding 30] #:color [color blue] #:inner-color [inner-color (light (light color))] . children)
   (define child (apply append-gap-size children))
   (define w (if width width (+ (* padding 2) (pict-width child))))
   (define h (if height height (+ (* padding 2) (pict-height child))))
@@ -158,7 +194,7 @@
     w
     h
     CORNER-RADIUS
-    #:color (light (light color))
+    #:color inner-color
     #:border-color color
     #:border-width BORDERWIDTH))
   (define x (/ (- w (pict-width child)) 2))
@@ -168,11 +204,11 @@
     x y
     child))
 
-(define (make-flash #:width [width #f] #:height [height #f]  #:padding [padding 30] #:color [color "blue"] . children)
+(define (make-flash #:width [width #f] #:height [height #f]  #:padding [padding 30] #:color [color blue] #:inner-color [inner-color (light (light color))]  . children)
   (define child (apply append-gap-size children))
   (define w (if width width (+ (* padding 2) (pict-width child))))
   (define h (if height height (+ (* padding 2) (pict-height child))))
-  (define filled (linewidth BORDERWIDTH (colorize (filled-flash w h) (light (light color)))))
+  (define filled (linewidth BORDERWIDTH (colorize (filled-flash w h) inner-color)))
   (define outline (linewidth BORDERWIDTH (colorize (outline-flash w h) color)))
   (define rect (lt-superimpose filled outline))
   (define x (/ (- w (pict-width child)) 2))
@@ -182,66 +218,83 @@
    x y
    child))
 
-(define (fade-iter iter current-iter t pict)
-   (pict-if (> current-iter iter)
+(define (fade-iter iter pict)
+   (pict-if (> (current-iter) iter)
             pict
-            (pict-if (equal? iter current-iter)
-                     (cellophane pict t)
+            (pict-if (equal? iter (current-iter))
+                     (cellophane pict (current-time))
                      (ghost pict))))
 
-(define (move-anim iter current-iter t x0 y0 x1 y1 pict)
-  (if (> current-iter iter)
-      (superimpose (blank 0 0) pict x1 y1)
-      (if (equal? iter current-iter)
-          (superimpose (blank 0 0) pict (+ x0 (* t (- x1 x0))) (+ y0 (* t (- y1 y0))))
+(define (move-anim iter x0 y0 x1 y1 pict)
+  (if (> (current-iter) iter)
+      (superimpose x1 y1 (blank 0 0))
+      (if (equal? iter (current-iter))
+          (superimpose (+ x0 (* t (- x1 x0))) (+ y0 (* t (- y1 y0))) (blank 0 0) pict)
               pict
               )))
 
 (define (highlight-iter iter current-iter pict)
-  (pict-if (>= current-iter iter)
+  (pict-if (>= (current-iter) iter)
            (blue pict)
            pict))
 
-(define (combine-at iter current-iter time pict1 pict2 #:combine [combine cc-superimpose])
-  (pict-if (equal? iter current-iter)
-           (cc-superimpose pict1 (cellophane pict2 time))
+(define (combine-at iter pict1 pict2 #:combine [combine cc-superimpose])
+  (pict-if (equal? iter (current-iter))
+           (cc-superimpose pict1 (cellophane pict2 (current-time)))
            (pict-if #:combine combine
-                    (> current-iter iter)
+                    (> (current-iter) iter)
                     pict2
                     pict1)))
 
-(define (swap-at iter current-iter time pict1 pict2 #:combine [combine lbl-superimpose])
-  (pict-if (equal? iter current-iter)
-          (combine (cellophane pict2 time)
-                   (cellophane pict1 (- 1 time)))
+(define (show-at-iter iter pict #:alt [alt #f])
+  (define temp
+    (if alt
+        alt
+        (blank (pict-width pict) (pict-height pict))))
+  (swap-at iter
+    temp
+    (swap-at (+ iter 1) pict temp)))
+
+(define (swap-at iter pict1 pict2 #:combine [combine lt-superimpose])
+  (pict-if (equal? iter (current-iter))
+          (combine (cellophane pict2 (current-time))
+                   (cellophane pict1 (- 1 (current-time))))
           (pict-if #:combine combine
-           (> current-iter iter)
+           (> (current-iter) iter)
            pict2
            pict1)))
 
-(define (swap-temporary iter current-iter time pict1 pict2)
-  (swap-at (+ iter 1) current-iter time
-          (swap-at iter current-iter time pict1 pict2)
+(define (swap-temporary iter pict1 pict2)
+  (swap-at (+ iter 1)
+          (swap-at iter pict1 pict2)
           pict1))
 
-(define (cycle-through start-iter current-iter time picts #:combine [combine lbl-superimpose])
+(define (cycle-through start-iter picts #:combine [combine lbl-superimpose])
  (let loop ([iter (+ (length picts) -1 start-iter)] [todo (reverse picts)])
     (cond
       [(empty? todo)
        (blank 0 0)]
       [else
         (pict-if #:combine combine
-                (equal? current-iter iter)
+                (equal? (current-iter) iter)
                  (combine
-                   (cellophane (first todo) time)
+                   (cellophane (first todo) (current-time))
                    (if (> (length todo) 1)
-                       (cellophane (second todo) (- 1 time))
+                       (cellophane (second todo) (- 1 (current-time)))
                        (blank 0 0)))
                  (pict-if #:combine combine
-                          (> current-iter iter)
+                          (> (current-iter) iter)
                           (first todo)
                           (loop (- iter 1) (rest todo))
                           ))])))
+
+(define (scale-to-height height pict)
+  (define factor (/ height (pict-height pict)))
+  (scale pict factor))
+
+(define (scale-to-width width pict)
+  (define factor (/ width (pict-width pict)))
+  (scale pict factor))
 
 (define (clip-to-fit picture width height)
   (define factor (/ height (pict-height picture)))
@@ -254,6 +307,7 @@
 
   (make-dynamic-slide #:iters iters #:layout 'center #:start start
     (lambda (iter time)
+      (parameterize ([current-iter iter] [current-time time])
       (apply (curry vl-append (* 1 (current-gap-size)))
              (for/list ([heading section-headings] [func section-funcs] [i (in-range (length section-headings))])
                (vl-append (current-gap-size)
@@ -266,20 +320,22 @@
                                         (if (equal? (+ i 1) progress)
                                             start
                                             -1)
-                                        iter time (scale (bitmap "check.png") 0.2)))
+                                        (scale (bitmap "check.png") 0.2)))
                                     box)
                             (tt heading))
-                          (if func (func iter time) (blank))
-                          ))))))
+                          (if func (func) (blank))
+                          )))))))
+        
+
 
 (define robot-happy
-  (bitmap "robot/smile.png"))
+  (bitmap "assets/robot/smile.png"))
 
 (define robot-sad
-  (bitmap "robot/frown.png"))
+  (bitmap "assets/robot/frown.png"))
 
 (define robot-idea
-  (scale (bitmap "robot/ideacropped.png") 0.5))
+  (scale (bitmap "assets/robot/ideacropped.png") 0.5))
 
 (define small-robot-happy
   (scale robot-happy 0.15))
@@ -297,13 +353,30 @@
 
 (define (superimpose-on dx dy location-pict pict base #:finder [finder tl-find])
   (define-values (x y) (finder base location-pict))
-  (superimpose base pict (+ x dx) (+ y dy)))
+  (superimpose (+ x dx) (+ y dy) base pict ))
+
+(define (superimpose-center dx dy pict base)
+  (define x (- (/ (pict-width base) 2.0)
+               (/ (pict-width pict) 2.0)))
+  (define y (- (/ (pict-height base) 2.0)
+               (/ (pict-height pict) 2.0)))
+  (superimpose  (+ x dx) (+ y dy) base pict))
 
 (define (my-pin-over dx dy pict base)
   (pin-over base dx dy pict))
-(define (pin-on dx dy location-pict pict base #:finder [finder tl-find])
+(define (pin-on dx dy location-pict pict base #:finder [finder tl-find] #:align-x [align-x 'left] #:align-y [align-y 'top])
   (define-values (x y) (finder base location-pict))
-  (pin-over base (+ x dx) (+ y dy) pict))
+  (define x-adjusted
+    (match align-x
+      ['left x]
+      ['right (- x (pict-width pict))]
+      ['center (- x (/ (pict-width pict) 2))]))
+  (define y-adjusted
+    (match align-y
+      ['top y]
+      ['bottom (- y (pict-height pict))]
+      ['center (- y (/ (pict-height pict) 2))]))
+  (pin-over base (+ x-adjusted dx) (+ y-adjusted dy) pict))
 
 (define (image->bitmap image)
   (let* ([width (pict-width image)]
@@ -352,3 +425,43 @@
 
   (images->pdf picts port 1.0)
   )
+
+
+(define (pretty-display-string expr)
+  (define output (open-output-string))
+  (pretty-display expr output)
+  (get-output-string output))
+
+(define (egglog-repl content [repl-h (* client-h 4/5)])
+  (define namespace (make-base-empty-namespace))
+  (parameterize ([current-namespace namespace])
+    (namespace-require 'egglog))
+  (make-repl content repl-h #:namespace namespace))
+
+(define (remove-whitespace str)
+  (regexp-replace* #px"\\s" str ""))
+
+
+(define (make-repl content [repl-h (* client-h 4/5)] #:namespace [namespace (make-base-namespace)])
+  (define content-string
+    (string-join
+    (for/list ([line content])
+      (pretty-display-string line))
+      "\n"))
+  (println content-string)
+  (define split-by-lines
+    (regexp-split #px"\n" content-string))
+
+  (define re-joined
+    (string-join
+    (for/list ([line split-by-lines] [iter (in-range (length split-by-lines))]
+              #:when (not (equal? (remove-whitespace line) ""))
+    )
+      (if (> iter 0)
+          (string-append "   " line)
+          line))
+          "\n"))
+  (println re-joined)
+  (repl-area #:width (* client-w 1) #:height repl-h #:font-size 30
+             #:make-namespace (lambda () namespace)
+             re-joined))
