@@ -432,28 +432,44 @@
   (pretty-display expr output)
   (get-output-string output))
 
-(define (egglog-repl content [repl-h (* client-h 4/5)])
-  (define namespace (make-base-empty-namespace))
-  (parameterize ([current-namespace namespace])
-    (namespace-require 'egglog))
-  (make-repl content repl-h #:namespace namespace))
+
 
 (define (remove-whitespace str)
   (regexp-replace* #px"\\s" str ""))
 
+(define (make-repls-for-code code #:repl-fun [repl-fun make-repl] #:callback [callback (lambda (x) x)])
+  (for/list ([iter (in-range (* 2 (length code)))])
+    (define first-n 
+      (take code (floor (/ (+ iter 1) 2))))
+    (define last-line
+      (cond
+        [(even? iter)
+         (list (list-ref code (floor (/ iter 2))))]
+        [else
+         '()]))
+    (callback (repl-fun last-line #:pre-content first-n))))
 
-(define (make-repl content [repl-h (* client-h 4/5)] #:namespace [namespace (make-base-namespace)])
+(define (read-sexps port)
+  (cond
+    [(eof-object? (peek-char port))
+     '()]
+    [else
+      (cons (read port) (read-sexps port))]))
+
+
+(define (make-egglog-repl content [repl-h (* client-h 4/5)] #:pre-content [pre-content '()])
+  (define namespace (make-base-empty-namespace))
+  (parameterize ([current-namespace namespace])
+    (namespace-require 'egglog))
+  (make-repl content repl-h #:namespace namespace #:pre-content pre-content))
+
+
+(define (process-line line)
   (define content-string
-    (string-join
-    (for/list ([line content])
-      (pretty-display-string line))
-      "\n"))
-  (println content-string)
+    (pretty-display-string line))
   (define split-by-lines
     (regexp-split #px"\n" content-string))
-
-  (define re-joined
-    (string-join
+  (string-join
     (for/list ([line split-by-lines] [iter (in-range (length split-by-lines))]
               #:when (not (equal? (remove-whitespace line) ""))
     )
@@ -461,7 +477,14 @@
           (string-append "   " line)
           line))
           "\n"))
-  (println re-joined)
-  (repl-area #:width (* client-w 1) #:height repl-h #:font-size 30
+
+(define (process-code code)
+  (for/list ([line code])
+    (process-line line)))
+    
+
+(define (make-repl content [repl-h (* client-h 4/5)] #:namespace [namespace (make-base-namespace)] #:pre-content [pre-content '()])
+  (apply repl-area #:width (* client-w 1) #:height repl-h #:font-size 30
              #:make-namespace (lambda () namespace)
-             re-joined))
+             #:pre-content (process-code pre-content)
+             (process-code content)))
