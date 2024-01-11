@@ -86,6 +86,26 @@
       #:color color
       #:border-width 0))))))
 
+(define (take-first n lst)
+  (take lst (min n (length lst))))
+(define (drop-first n lst)
+  (drop lst (min n (length lst))))
+
+
+(define (make-grid picts #:num-columns [num-columns 10] #:spacing [spacing 0])
+  (define num-rows (ceiling (/ (length picts) num-columns)))
+
+  ;; split all picts into rows
+  (define rows
+    (for/list ([row (in-range num-rows)])
+      (define start (* row num-columns))
+      (apply ht-append spacing
+             (take-first num-columns (list-tail picts start)))))
+
+  (println (format "made grid with ~a cards all in ~a columns and ~a rows" (length picts) num-columns num-rows))
+  (apply vl-append spacing
+         rows))
+
 ;; like the append methods, but stacks the elements on top of each other
 (define (stack x y . elements)
   (cond 
