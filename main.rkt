@@ -59,6 +59,33 @@
     (vl-append (blank 0 (if (> y 0) y 0))
       (ht-append (blank (if (> x 0) x 0) 0) pictb))))
 
+;; test this one before this
+(define (superimpose-better x y new base)
+  (define xpos
+    (if (equal? x 'center)
+        (/ (- (pict-width base) (pict-width new)) 2)
+        x))
+  (define ypos
+    (if (equal? y 'center)
+        (/ (- (pict-height base) (pict-height new)) 2)
+        y))
+  (lt-superimpose
+   base
+   (inset new xpos ypos 0 0)))
+
+(define (rect-with-border width height #:color [color "white"] #:border-color [border-color "black"] #:border-width [border-width 1])
+  (superimpose 0 0
+    (filled-rectangle width border-width  #:color border-color #:border-width 0)
+    (superimpose 0 0
+      (filled-rectangle border-width height #:color border-color #:border-width 0)
+      (superimpose (- width border-width) 0
+        (filled-rectangle border-width height #:color border-color #:border-width 0)
+        (superimpose 0 (- height border-width)
+          (filled-rectangle width border-width #:color border-color #:border-width 0)
+          (filled-rectangle width height
+      #:color color
+      #:border-width 0))))))
+
 ;; like the append methods, but stacks the elements on top of each other
 (define (stack x y . elements)
   (cond 
@@ -264,6 +291,16 @@
            pict2
            pict1)))
 
+(define (swap-instant iter pict1 pict2 #:combine [combine lt-superimpose])
+  (pict-if (equal? iter (current-iter))
+          (combine (cellophane pict2
+                      (if (> (current-time) 0.5) 1.0 0.0))
+                   (cellophane pict1 (if (<= (current-time) 0.5) 1.0 0.0)))
+          (pict-if #:combine combine
+           (> (current-iter) iter)
+           pict2
+           pict1)))
+
 (define (swap-temporary iter pict1 pict2)
   (swap-at (+ iter 1)
           (swap-at iter pict1 pict2)
@@ -294,6 +331,12 @@
 
 (define (scale-to-width width pict)
   (define factor (/ width (pict-width pict)))
+  (scale pict factor))
+
+(define (my-scale-to-fit width height pict)
+  (define factor
+    (min (/ width (pict-width pict))
+         (/ height (pict-height pict))))
   (scale pict factor))
 
 (define (clip-to-fit picture width height)
@@ -437,7 +480,9 @@
 (define (remove-whitespace str)
   (regexp-replace* #px"\\s" str ""))
 
-(define (make-repls-for-code code #:repl-fun [repl-fun make-repl] #:callback [callback (lambda (x) x)])
+(define (make-repls-for-code code #:repl-fun [repl-fun make-repl] #:callback [callback (lambda (repl namespace callback-box) repl)])
+  (define callback-box (box (lambda () void)))
+  (define eval-callback (lambda () ((unbox callback-box))))
   (for/list ([iter (in-range (* 2 (length code)))])
     (define first-n 
       (take code (floor (/ (+ iter 1) 2))))
@@ -447,7 +492,9 @@
          (list (list-ref code (floor (/ iter 2))))]
         [else
          '()]))
-    (callback (repl-fun last-line #:pre-content first-n))))
+    (define-values (repl namespace)
+      (repl-fun last-line #:pre-content first-n #:eval-callback eval-callback))
+    (callback repl namespace callback-box)))
 
 (define (read-sexps port)
   (cond
@@ -457,24 +504,25 @@
       (cons (read port) (read-sexps port))]))
 
 
-(define (make-egglog-repl content [repl-h (* client-h 4/5)] #:pre-content [pre-content '()])
+(define (make-egglog-repl content [repl-w (* client-w 1)] [repl-h (* client-h 2/3)] #:pre-content [pre-content '()] #:eval-callback eval-callback)
   (define namespace (make-base-empty-namespace))
   (parameterize ([current-namespace namespace])
     (namespace-require 'egglog))
-  (make-repl content repl-h #:namespace namespace #:pre-content pre-content))
+  (values (make-repl content repl-w repl-h #:namespace namespace #:pre-content pre-content #:eval-callback eval-callback)
+          namespace))
 
 
-(define (process-line line)
-  (define content-string
-    (pretty-display-string line))
+(define (process-line content-string)
   (define split-by-lines
     (regexp-split #px"\n" content-string))
+  (define without-blanks
+    (for/list ([line split-by-lines]
+               #:when (not (equal? (remove-whitespace line) "")))
+      line))
   (string-join
-    (for/list ([line split-by-lines] [iter (in-range (length split-by-lines))]
-              #:when (not (equal? (remove-whitespace line) ""))
-    )
+    (for/list ([line without-blanks] [iter (in-naturals)])
       (if (> iter 0)
-          (string-append "   " line)
+          (string-append "  " line)
           line))
           "\n"))
 
@@ -483,8 +531,49 @@
     (process-line line)))
     
 
-(define (make-repl content [repl-h (* client-h 4/5)] #:namespace [namespace (make-base-namespace)] #:pre-content [pre-content '()])
-  (apply repl-area #:width (* client-w 1) #:height repl-h #:font-size 30
+(define (make-repl content [repl-w (* client-w 1)] [repl-h (* client-h 2/3)] #:namespace [namespace (make-base-namespace)] #:pre-content [pre-content '()]
+                     #:eval-callback eval-callback)
+  (apply repl-area #:width repl-w #:height repl-h #:font-size 30
+             #:persist? #t
+             #:wrap-text? #t
              #:make-namespace (lambda () namespace)
              #:pre-content (process-code pre-content)
+             #:eval-callback eval-callback
              (process-code content)))
+
+(define (get-port-pos port)
+  (define-values
+    (_line _whatever next)
+    (port-next-location port))
+  (- next 1))
+
+(define (break-up-code source-string)
+  (define port (open-input-string source-string))
+  (port-count-lines! port)
+  (let loop ([pos 0])
+    (define first-sexp
+      (read port))
+    (cond
+      [(eof-object? first-sexp)
+      '()]
+      [else
+       (define next (get-port-pos port))
+       (define syntax-string
+         (substring source-string pos next))
+       (flush-output (current-output-port))
+       (cons syntax-string
+             (loop next))])))
+
+     
+    
+(define (run-command cmd)
+  (define-values (process output input error)
+    (apply subprocess #f #f #f cmd))
+  (close-output-port input)
+  (define all-output 
+    (port->string output))
+  (define all-error
+    (port->string error))
+  (println all-error)
+  (subprocess-wait process))
+
